@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Face Filter</title>
+<style>
+  :root { --bg:#14101f; --panel:#221a36; --ink:#f4efff; --dim:#a99cc8; --accent:#ffcf3f; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font-family:"Trebuchet MS","Segoe UI",sans-serif; }
+  body { display:flex; flex-direction:column; align-items:center; gap:14px; padding:14px; }
+  h1 { margin:0; font-size:1.2rem; letter-spacing:.02em; }
+  #stage { position:relative; width:min(100%,720px); aspect-ratio:4/3; background:#000; border-radius:18px; overflow:hidden; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  video { display:none; }
+  #msg { position:absolute; inset:0; display:flex; flex-direction:column; gap:12px; align-items:center; justify-content:center; text-align:center; padding:24px; background:rgba(20,16,31,.92); }
+  #msg p { margin:0; color:var(--dim); max-width:36ch; }
+  button { font:inherit; cursor:pointer; border:0; border-radius:999px; padding:10px 18px; background:var(--panel); color:var(--ink); }
+  button:hover { background:#34285a; }
+  button:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+  button[aria-pressed="true"], #start { background:var(--accent); color:#1b1330; font-weight:700; }
+  #bar { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; width:min(100%,720px); }
+</style>
+</head>
+<body>
+<h1>Face Filter</h1>
+<div id="stage">
+  <video id="cam" playsinline muted></video>
+  <canvas id="out"></canvas>
+  <div id="msg">
+    <p id="msgText">Your camera stays on this device. Nothing is uploaded.</p>
+    <button id="start">Start camera</button>
+  </div>
+</div>
+<div id="bar" role="group" aria-label="Filters"></div>
+<div id="bar2" style="display:flex;gap:8px">
+  <button id="snap">Save photo</button>
+</div>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const video = document.getElementById("cam");
+const cv = document.getElementById("out");
+const ctx = cv.getContext("2d");
+const msg = document.getElementById("msg");
+const msgText = document.getElementById("msgText");
+const bar = document.getElementById("bar");
+
+// ---------- Filters ----------
+// Each draws in a head-aligned coordinate system: origin = between the eyes,
+// x along the eye line, units = face width (ear to ear = 1).
+const filters = {
+  Sunglasses(c, f) {
+    c.fillStyle = "#111"; c.strokeStyle = "#ffcf3f"; c.lineWidth = 0.012;
+    for (const s of [-1, 1]) {
+      c.beginPath(); c.roundRect(s * 0.17 - 0.13, -0.07, 0.26, 0.17, 0.05); c.fill(); c.stroke();
+      c.fillStyle = "rgba(255,255,255,.25)";
+      c.beginPath(); c.ellipse(s * 0.17 - 0.05, -0.02, 0.03, 0.012, -0.5, 0, 7); c.fill();
+      c.fillStyle = "#111";
+    }
+    c.beginPath(); c.moveTo(-0.04, 0); c.quadraticCurveTo(0, -0.04, 0.04, 0); c.stroke();
+    c.beginPath(); c.moveTo(-0.3, -0.02); c.lineTo(-0.5, 0); c.moveTo(0.3, -0.02); c.lineTo(0.5, 0); c.stroke();
+  },
+  Crown(c, f) {
+    const y = -f.foreheadUp;
+    c.fillStyle = "#ffcf3f"; c.strokeStyle = "#b8860b"; c.lineWidth = 0.012;
+    c.beginPath();
+    c.moveTo(-0.3, y);
+    c.lineTo(-0.34, y - 0.25); c.lineTo(-0.17, y - 0.12);
+    c.lineTo(0, y - 0.32); c.lineTo(0.17, y - 0.12);
+    c.lineTo(0.34, y - 0.25); c.lineTo(0.3, y);
+    c.closePath(); c.fill(); c.stroke();
+    for (const [x, col] of [[-0.34, "#ff4d6d"], [0, "#4dd2ff"], [0.34, "#ff4d6d"]]) {
+      c.fillStyle = col; c.beginPath(); c.arc(x, y - (x ? 0.25 : 0.32), 0.028, 0, 7); c.fill();
+    }
+  },
+  Cat(c, f) {
+    const y = -f.foreheadUp + 0.04;
+    for (const s of [-1, 1]) {
+      c.fillStyle = "#3a2d4f";
+      c.beginPath(); c.moveTo(s * 0.12, y); c.lineTo(s * 0.4, y - 0.38); c.lineTo(s * 0.44, y + 0.06); c.closePath(); c.fill();
+      c.fillStyle = "#ff9ec1";
+      c.beginPath(); c.moveTo(s * 0.2, y - 0.02); c.lineTo(s * 0.38, y - 0.27); c.lineTo(s * 0.4, y + 0.03); c.closePath(); c.fill();
+    }
+    const n = f.noseY;
+    c.fillStyle = "#ff7aa8"; c.beginPath(); c.moveTo(-0.045, n - 0.03); c.lineTo(0.045, n - 0.03); c.lineTo(0, n + 0.02); c.fill();
+    c.strokeStyle = "#fff"; c.lineWidth = 0.008; c.lineCap = "round";
+    for (const s of [-1, 1]) for (const k of [-0.03, 0.01, 0.05]) {
+      c.beginPath(); c.moveTo(s * 0.1, n + 0.03 + k * 0.4); c.lineTo(s * 0.42, n + 0.01 + k * 2.2); c.stroke();
+    }
+  },
+  Clown(c, f) {
+    const n = f.noseY;
+    c.fillStyle = "#e8262d"; c.beginPath(); c.arc(0, n, 0.07, 0, 7); c.fill();
+    c.fillStyle = "rgba(255,255,255,.55)"; c.beginPath(); c.arc(-0.02, n - 0.025, 0.02, 0, 7); c.fill();
+    for (const s of [-1, 1]) {
+      c.fillStyle = "rgba(255,90,120,.45)"; c.beginPath(); c.arc(s * 0.24, n + 0.02, 0.07, 0, 7); c.fill();
+    }
+    c.fillStyle = "#2a63e8"; c.beginPath(); c.moveTo(-0.03, -0.14); c.lineTo(0.03, -0.14); c.lineTo(0, -0.04); c.fill();
+  },
+  Mustache(c, f) {
+    const y = f.mouthTopY - 0.045;
+    c.fillStyle = "#2b1a14";
+    for (const s of [-1, 1]) {
+      c.beginPath();
+      c.moveTo(0, y - 0.015);
+      c.bezierCurveTo(s * 0.06, y - 0.06, s * 0.17, y - 0.05, s * 0.24, y + 0.02);
+      c.bezierCurveTo(s * 0.16, y + 0.0, s * 0.08, y + 0.04, 0, y + 0.025);
+      c.fill();
+    }
+  },
+  Mesh(c, f, lm, W, H, raw) {
+    // drawn in screen space instead; see render()
+  }
+};
+let active = "Sunglasses";
+Object.keys(filters).forEach(name => {
+  const b = document.createElement("button");
+  b.textContent = name; b.setAttribute("aria-pressed", name === active);
+  b.onclick = () => { active = name; [...bar.children].forEach(x => x.setAttribute("aria-pressed", x === b)); };
+  bar.appendChild(b);
+});
+
+// ---------- Tracking ----------
+let landmarker = null, lastT = -1;
+
+async function start() {
+  try {
+    msgText.textContent = "Loading face tracker…";
+    document.getElementById("start").hidden = true;
+    const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    landmarker = await FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        delegate: "GPU"
+      },
+      runningMode: "VIDEO", numFaces: 2
+    });
+    msgText.textContent = "Starting camera…";
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 1280, height: 960 }, audio: false });
+    await video.play();
+    msg.hidden = true;
+    requestAnimationFrame(render);
+  } catch (e) {
+    msg.hidden = false;
+    msgText.textContent = "Couldn't start: " + (e.message || e) + ". Allow camera access and open this file over https or from localhost.";
+    const s = document.getElementById("start"); s.hidden = false; s.textContent = "Try again";
+  }
+}
+document.getElementById("start").onclick = start;
+
+function render(t) {
+  requestAnimationFrame(render);
+  if (video.readyState < 2) return;
+  const W = video.videoWidth, H = video.videoHeight;
+  if (cv.width !== W) { cv.width = W; cv.height = H; }
+  ctx.save();
+  ctx.translate(W, 0); ctx.scale(-1, 1);            // mirror like a selfie
+  ctx.drawImage(video, 0, 0, W, H);
+
+  if (t !== lastT) {
+    lastT = t;
+    const res = landmarker.detectForVideo(video, performance.now());
+    render.faces = res.faceLandmarks || [];
+  }
+  for (const lm of render.faces || []) {
+    if (active === "Mesh") { drawMesh(lm, W, H); continue; }
+    const P = i => ({ x: lm[i].x * W, y: lm[i].y * H });
+    const eyeL = P(33), eyeR = P(263), earL = P(234), earR = P(454);
+    const nose = P(1), top = P(10), mouth = P(13);
+    const mid = { x: (eyeL.x + eyeR.x) / 2, y: (eyeL.y + eyeR.y) / 2 };
+    const angle = Math.atan2(eyeR.y - eyeL.y, eyeR.x - eyeL.x);
+    const size = Math.hypot(earR.x - earL.x, earR.y - earL.y);   // face width in px
+    const fr = {
+      foreheadUp: Math.hypot(mid.x - top.x, mid.y - top.y) / size,
+      noseY: Math.hypot(nose.x - mid.x, nose.y - mid.y) / size,
+      mouthTopY: Math.hypot(mouth.x - mid.x, mouth.y - mid.y) / size
+    };
+    ctx.save();
+    ctx.translate(mid.x, mid.y); ctx.rotate(angle); ctx.scale(size, size);
+    filters[active](ctx, fr);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawMesh(lm, W, H) {
+  ctx.fillStyle = "#ffcf3f";
+  for (let i = 0; i < lm.length; i += 2) {
+    ctx.beginPath(); ctx.arc(lm[i].x * W, lm[i].y * H, 1.6, 0, 7); ctx.fill();
+  }
+}
+
+document.getElementById("snap").onclick = () => {
+  const a = document.createElement("a");
+  a.download = "face-filter.png"; a.href = cv.toDataURL("image/png"); a.click();
+};
+</script>
+</body>
+</html>
